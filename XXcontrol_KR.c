@@ -157,8 +157,8 @@ Y6
 //#define SINGLE_COPTER
 //#define DUAL_COPTER
 //#define TWIN_COPTER
-//#define TRI_COPTER
-#define QUAD_COPTER
+#define TRI_COPTER
+//#define QUAD_COPTER
 //#define QUAD_X_COPTER
 //#define Y4_COPTER
 //#define HEX_COPTER
@@ -171,8 +171,8 @@ Y6
 // uses Timer 1 ticks to control output rate.
 //#define ESC_RATE 300	// in Hz
 //#define ESC_RATE 400	// in Hz (at SINGLE_COPTER Only)
-//#define ESC_RATE 450	// in Hz
-#define ESC_RATE 495	// in Hz
+#define ESC_RATE 450	// in Hz
+//#define ESC_RATE 495	// in Hz
 
 #define PWM_LOW_PULSE_INTERVAL  (((F_CPU / 8) / ESC_RATE) - 2000)/10
 //#define PWM_LOW_PULSE_INTERVAL  ((1000000 / ESC_RATE) - 2000)/10
@@ -181,20 +181,20 @@ Y6
 // Adjust these:
 // 		down if you have too much gyro assistance
 // 		up if you have maxxed your gyro gain 
-#define ROLL_GAIN_MULTIPLIER 	3	// 3
-#define PITCH_GAIN_MULTIPLIER 	3	// 3, Twin: 4
-#define YAW_GAIN_MULTIPLIER 	3	// 3
+#define ROLL_GAIN_DIVIDER 	32	/* Was about 64 */
+#define PITCH_GAIN_DIVIDER 	32	/* Was about 64 */
+#define YAW_GAIN_DIVIDER 	32	/* Was about 64 */
 
 // Stick Gain
-#define NORMAL_STICK_ROLL_GAIN		50		// Stick %, Normal: 50, Acro: 60~70
-#define NORMAL_STICK_PITCH_GAIN		50		// Stick %, Normal: 50, Acro: 60~70
-#define NORMAL_STICK_YAW_GAIN		50		// Stick %, Normal: 50, Acro: 60~70
+//#define NORMAL_STICK_ROLL_GAIN		100		// Stick %, Normal: 50, Acro: 60~70
+//#define NORMAL_STICK_PITCH_GAIN		100		// Stick %, Normal: 50, Acro: 60~70
+//#define NORMAL_STICK_YAW_GAIN		100		// Stick %, Normal: 50, Acro: 60~70
 
 #define ACRO_STICK_ROLL_GAIN		70		// Stick %, Normal: 50, Acro: 60~70
 #define ACRO_STICK_PITCH_GAIN		70		// Stick %, Normal: 50, Acro: 60~70
 #define ACRO_STICK_YAW_GAIN			70		// Stick %, Normal: 50, Acro: 60~70
 #define UFO_STICK_YAW_GAIN			90		// Stick %, Normal: 50, Acro: 60~70, UFO: 80~90
-#define ADC_GAIN_DIVIDER			200		// Gyro Value Range (-100~100: 150, -150~150: 225, -250~250: 375)
+//#define ADC_GAIN_DIVIDER			100		// Gyro Value Range (-100~100: 150, -150~150: 225, -250~250: 375)
 
 // Stick Arming - enable this line to enable Stick arming
 #define STICK_ARMING 60
@@ -250,7 +250,7 @@ struct Config_Struct
 CONFIG_STRUCT Config;				// Holds configuration (from eeProm)
 
 bool GyroCalibrated;
-volatile BOOL RxChannelsUpdatingFlag;
+//volatile BOOL RxChannelsUpdatingFlag;
 
 bool Armed;
 
@@ -274,15 +274,25 @@ volatile uint16_t RxChannel2;
 volatile uint16_t RxChannel3;
 volatile uint16_t RxChannel4;
 
-uint16_t RxChannel1Start;			// ISR vars
-uint16_t RxChannel2Start;
-uint16_t RxChannel3Start;
-uint16_t RxChannel4Start;
+//uint16_t RxChannel1Start;			// ISR vars
+//uint16_t RxChannel2Start;
+//uint16_t RxChannel3Start;
+//uint16_t RxChannel4Start;
 
 int16_t RxInRoll;					// program vars
 int16_t RxInPitch;
 int16_t RxInCollective;
 int16_t RxInYaw;
+
+register uint16_t RxChannel1Start asm("r2");			// ISR vars
+register uint16_t RxChannel2Start asm("r4");
+register uint16_t RxChannel3Start asm("r6");
+register uint16_t RxChannel4Start asm("r8");
+
+//register int16_t RxInRoll asm("r10");					// program vars
+//register int16_t RxInPitch asm("r12");
+//register int16_t RxInCollective asm("r14");
+//register int16_t RxInYaw asm("r16");
 #ifdef TWIN_COPTER
 int16_t RxInOrgPitch;
 #endif
@@ -291,6 +301,8 @@ int16_t gyroADC[3];					// Holds Gyro ADC's
 int16_t gyroZero[3] = {0,0,0};		// used for calibrating Gyros on ground
 
 uint16_t ModeDelayCounter;
+
+//register uint16_t t asm("r6");
 
 bool output_motor_high = false;
 uint16_t PWM_Low_Pulse_Interval = PWM_LOW_PULSE_INTERVAL;		// non-const version of PWM_LOW_PULSE_INTERVAL
@@ -305,10 +317,6 @@ int16_t MotorOut5;
 #if defined(TWIN_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
 int16_t MotorOut6;
 #endif
-
-int16_t StickRollGain;
-int16_t StickPitchGain;
-int16_t StickYawGain;
 
 void setup(void);
 void loop(void);
@@ -333,19 +341,23 @@ void eeprom_write_block_changes( const uint8_t * src, void * dest, size_t size )
 void delay_us(uint8_t time);
 void delay_ms(uint16_t time);
 
-
 // RX_ROLL
 ISR(PCINT2_vect)
 {
+//	register uint8_t tisp asm("r18");
+//	asm volatile("push %0" : "=r" (tisp) : "0" (tisp));
+//	tisp = SREG;
 	if ( RX_ROLL )			// rising
 	{
 		RxChannel1Start = TCNT1;
-
 	} else {				// falling
-		RxChannelsUpdatingFlag = 1;
+//		RxChannelsUpdatingFlag = 1;
 		RxChannel1 = TCNT1 - RxChannel1Start;
-		RxChannelsUpdatingFlag = 0;
+//		RxChannelsUpdatingFlag = 0;
 	}
+//	asm volatile("out 0x3f, r0");
+//	SREG = tisp;
+//	asm volatile("pop %0" : "=r" (tisp));
 }
 
 // RX_PITCH
@@ -354,11 +366,10 @@ ISR(INT0_vect)
 	if (RX_PITCH)		
 	{
 		RxChannel2Start = TCNT1;
-
 	} else {				// falling
-		RxChannelsUpdatingFlag = 1;
+//		RxChannelsUpdatingFlag = 1;
 		RxChannel2 = TCNT1 - RxChannel2Start;
-		RxChannelsUpdatingFlag = 0;
+//		RxChannelsUpdatingFlag = 0;
 	}
 }
 
@@ -370,23 +381,24 @@ ISR(INT1_vect)
 		RxChannel3Start = TCNT1;
 
 	} else {				// falling
-		RxChannelsUpdatingFlag = 1;
+//		RxChannelsUpdatingFlag = 1;
 		RxChannel3 = TCNT1 - RxChannel3Start;
-		RxChannelsUpdatingFlag = 0;
+//		RxChannelsUpdatingFlag = 0;
 	}
 }
 
 // RX_YAW
 ISR(PCINT0_vect)
 {
+	
 	if ( RX_YAW )			// rising
 	{
 		RxChannel4Start = TCNT1;
 
 	} else {				// falling
-		RxChannelsUpdatingFlag = 1;
+//		RxChannelsUpdatingFlag = 1;
 		RxChannel4 = TCNT1 - RxChannel4Start;
-		RxChannelsUpdatingFlag = 0;
+//		RxChannelsUpdatingFlag = 0;
 	}
 }
 
@@ -477,7 +489,7 @@ void setup(void)
 	do {
 		ServoPPMRateDivider++;
 		i = ESC_RATE / ServoPPMRateDivider;
-	} while (i>50);
+	} while (i>250);
 #endif
 
 #ifdef SINGLE_COPTER
@@ -500,7 +512,7 @@ void setup(void)
 
 	GyroCalibrated = false;
 	Armed = false;
-	RxChannelsUpdatingFlag = 0;
+//	RxChannelsUpdatingFlag = 0;
 
 	RxChannel1 = Config.RxChannel1ZeroOffset;		// prime the channels 1520;
 	RxChannel2 = Config.RxChannel2ZeroOffset;		// 1520;
@@ -691,7 +703,7 @@ void setup(void)
 
 void loop(void)
 {
-	static uint8_t i;
+//	static uint8_t i;
 	static uint16_t Change_Arming=0;
 	static uint8_t Arming_TCNT2=0;
 
@@ -703,7 +715,7 @@ void loop(void)
 		Change_Arming += (uint8_t) (TCNT2 - Arming_TCNT2);
 		Arming_TCNT2 = TCNT2;
 
-		if (!Armed) {		// nb to switch to Right-Side Arming: if (!Armed) {
+		if (Armed) {		// nb to switch to Right-Side Arming: if (!Armed)
 			if (RxInYaw<STICK_ARMING || abs(RxInPitch) > 30) 	Change_Arming = 0;		// re-set count
 		} else {
 			if (RxInYaw>-STICK_ARMING || abs(RxInPitch) > 30) 	Change_Arming = 0;		// re-set count
@@ -720,15 +732,11 @@ void loop(void)
 
 			if (Armed) {
 				CalibrateGyros();
-				output_motor_high = false;	// re-set 1st time flag
+//				output_motor_high = false;	// re-set 1st time flag
 				LED = 1;
 
-				// Normal
-				StickRollGain = NORMAL_STICK_ROLL_GAIN;
-				StickPitchGain = NORMAL_STICK_PITCH_GAIN;
-				StickYawGain = NORMAL_STICK_YAW_GAIN;
-			} else if (output_motor_high) {
-				output_motor_ppm();			// turn off
+//			} else if (output_motor_high) {
+//				output_motor_ppm();			// turn off
 			}
 			return;
 		}
@@ -743,14 +751,15 @@ void loop(void)
 				//ModeDelayCounter = 0xFB4F;	// 0xFFFF-FB4F=0x4B0=1200/400 = 3Seconds
 				ModeDelayCounter = 0xFE6F;	// 0xFFFF-FE6F=0x190=400/400 = 1Seconds
 				CalibrateGyros();
+#if 0
 				output_motor_high = false;	// re-set 1st time flag
 				delay_ms(150);
-
 				// Normal
 				StickRollGain = NORMAL_STICK_ROLL_GAIN;
 				StickPitchGain = NORMAL_STICK_PITCH_GAIN;
 				StickYawGain = NORMAL_STICK_YAW_GAIN;
-
+#endif
+#if 0
 				// flash LED 1 time
 				for (i=0;i<1;i++)
 				{
@@ -759,68 +768,11 @@ void loop(void)
 					LED = 1;
 					delay_ms(25);
 				}
+#endif
 			}
 			ModeDelayCounter++;
 		}
-
-
-		// --- Acro Mode when Thr: Low, Elevator: Up, Rudder: Left ---
-		if (Armed && RxInYaw < -STICK_ARMING && RxInPitch < -STICK_ARMING)
-		{
-			if (ModeDelayCounter==0)
-			{
-				//ModeDelayCounter = 0xFB4F;	// 0xFFFF-FB4F=0x4B0=1200/400 = 3Seconds
-				ModeDelayCounter = 0xFE6F;	// 0xFFFF-FE6F=0x190=400/400 = 1Seconds
-				CalibrateGyros();
-				output_motor_high = false;	// re-set 1st time flag
-				delay_ms(100);
-
-				// Acro
-				StickRollGain = ACRO_STICK_ROLL_GAIN;
-				StickPitchGain = ACRO_STICK_PITCH_GAIN;
-				StickYawGain = ACRO_STICK_YAW_GAIN;
-
-				// flash LED 2 times
-				for (i=0;i<2;i++)
-				{
-					LED = 0;
-					delay_ms(25);
-					LED = 1;
-					delay_ms(25);
-				}
-			}
-			ModeDelayCounter++;
-		}
-
-		// --- UFO Mode when Thr: Low, Elevator: Up, Rudder: Right ---
-		if (Armed && RxInYaw > STICK_ARMING && RxInPitch < -STICK_ARMING)
-		{
-			if (ModeDelayCounter==0)
-			{
-				//ModeDelayCounter = 0xFB4F;	// 0xFFFF-FB4F=0x4B0=1200/400 = 3Seconds
-				ModeDelayCounter = 0xFE6F;	// 0xFFFF-FE6F=0x190=400/400 = 1Seconds
-				CalibrateGyros();
-				output_motor_high = false;	// re-set 1st time flag
-		
-				// Acro
-				StickRollGain = NORMAL_STICK_ROLL_GAIN;
-				StickPitchGain = NORMAL_STICK_PITCH_GAIN;
-				StickYawGain = UFO_STICK_YAW_GAIN;
-		
-				// flash LED 4 times
-				for (i=0;i<4;i++)
-				{
-					LED = 0;
-					delay_ms(25);
-					LED = 1;
-					delay_ms(25);
-				}
-			}
-			ModeDelayCounter++;
-		}
-
 	}
-
 	//--- Read gyros ---
 	ReadGyros(false);
 
@@ -874,9 +826,9 @@ void loop(void)
 
 	//--- Calculate roll gyro output ---
 	// nb IF YOU CHANGE THIS CODE, YOU MUST REMOVE PROPS BEFORE TESTING !!!
-	gyroADC[ROLL] = gyroADC[ROLL] * GainIn[ROLL] * ROLL_GAIN_MULTIPLIER;		// 100 * 50 * 3 = 15000	150 * 50 * 3 = 22500		250 * 50 * 3 = 37500
-	gyroADC[ROLL] /= ADC_GAIN_DIVIDER;											// 15000/150 = 100		22500/225 = 100		37500/375 = 100
-	RxInRoll = (RxInRoll * StickRollGain / 100);	// Stick Controll %
+	gyroADC[ROLL] = gyroADC[ROLL] * GainIn[ROLL];
+	gyroADC[ROLL] /= ROLL_GAIN_DIVIDER;
+//	RxInRoll = (RxInRoll * StickRollGain / 100);	// Stick Controll %
 
 	//--- (Add)Adjust roll gyro output to motors
 	if (Config.RollGyroDirection == GYRO_NORMAL) {
@@ -935,9 +887,9 @@ void loop(void)
 
 	//--- Calculate pitch gyro output ---
 	// nb IF YOU CHANGE THIS CODE, YOU MUST REMOVE PROPS BEFORE TESTING !!!
-	gyroADC[PITCH] = gyroADC[PITCH] * GainIn[PITCH] * PITCH_GAIN_MULTIPLIER;  
-	gyroADC[PITCH] /= ADC_GAIN_DIVIDER;
-	RxInPitch = (RxInPitch * StickPitchGain / 100);	// Stick Controll %
+	gyroADC[PITCH] = gyroADC[PITCH] * GainIn[PITCH];
+	gyroADC[PITCH] /= PITCH_GAIN_DIVIDER; 
+//	RxInPitch = (RxInPitch * StickPitchGain / 100);	// Stick Controll %
 
 	//--- (Add)Adjust pitch gyro output to motors
 	if (Config.PitchGyroDirection == GYRO_NORMAL) {	
@@ -1014,9 +966,9 @@ void loop(void)
 #endif
 
 	//--- Calculate yaw gyro output ---
-	gyroADC[YAW] = (gyroADC[YAW] * GainIn[YAW] * YAW_GAIN_MULTIPLIER);
-	gyroADC[YAW] /= ADC_GAIN_DIVIDER;
-	RxInYaw = (RxInYaw * StickYawGain / 100);			// Stick Controll %
+	gyroADC[YAW] = gyroADC[YAW] * GainIn[YAW];
+	gyroADC[YAW] /= YAW_GAIN_DIVIDER;
+//	RxInYaw = (RxInYaw * StickYawGain / 100);			// Stick Controll %
 
 	//--- (Add)Adjust yaw gyro output to motors
 	if (Config.YawGyroDirection == GYRO_NORMAL) {		// scale gyro output
@@ -1050,10 +1002,12 @@ void loop(void)
 	MotorOut4 += (LowpassOutServo[1] >> 1);
 	#endif
 #elif defined(TRI_COPTER)
+/*
 	RxInYaw -= LowpassOutYaw;
 	RxInYaw = (RxInYaw >> 3);
 	LowpassOutYaw += RxInYaw;
-
+*/
+	LowpassOutYaw = RxInYaw;
 	MotorOut4 += LowpassOutYaw;
 
 	// Servo Reverse Pin
@@ -1143,8 +1097,10 @@ void loop(void)
 		MotorOut1 = 0;
 		MotorOut2 = 0;
 		MotorOut3 = 0;
-		MotorOut4 = 50;
-		MotorOut5 = 50;
+		if (!Armed) {
+			MotorOut4 = 50;
+			MotorOut5 = 50;
+		}
 #elif defined(QUAD_COPTER) || defined(QUAD_X_COPTER) || defined(Y4_COPTER)
 		MotorOut1 = 0;
 		MotorOut2 = 0;
@@ -1160,7 +1116,8 @@ void loop(void)
 #endif
 	}
 
-	if (Armed) output_motor_ppm();		// output ESC signal
+	// Disable if Armed here so we always send signal to avoid Plush beeping: if (armed)
+	output_motor_ppm();		// output ESC signal
 }
 
 void Init_ADC(void)
@@ -1174,19 +1131,16 @@ void ReadGainPots(void)
 	read_adc( 3 );			// read roll gain ADC3
 	GainInADC[ROLL] = ADCL;
 	GainInADC[ROLL] += ((uint16_t) ADCH <<8);
-	GainInADC[ROLL] = 1024 - GainInADC[ROLL];
 	GainIn[ROLL] = GainInADC[ROLL] / 10;
 
 	read_adc( 4 );			// read pitch gain ADC4
 	GainInADC[PITCH] = ADCL;
 	GainInADC[PITCH] += ((uint16_t) ADCH <<8);
-	GainInADC[PITCH] = 1024 - GainInADC[PITCH];
 	GainIn[PITCH] = GainInADC[PITCH] / 10;
 
 	read_adc( 5 );			// read yaw gain ADC5
 	GainInADC[YAW] = ADCL;
 	GainInADC[YAW] += ((uint16_t) ADCH <<8);
-	GainInADC[YAW] = 1024 - GainInADC[YAW];
 	GainIn[YAW] = GainInADC[YAW] / 10;
 }
 
@@ -1265,27 +1219,35 @@ void RxGetChannels(void)
 {
 	static int16_t RxChannel;
 
-	while ( RxChannelsUpdatingFlag );
+//	while ( RxChannelsUpdatingFlag );
 
+	cli();
 	RxChannel = RxChannel1;
+	sei();
 	RxChannel -= Config.RxChannel1ZeroOffset;				// normalise
 	RxInRoll = (RxChannel >> 2);                    //     "
 
-	while ( RxChannelsUpdatingFlag );
+//	while ( RxChannelsUpdatingFlag );
 
+	cli();
 	RxChannel = RxChannel2;
+	sei();
 	RxChannel -= Config.RxChannel2ZeroOffset;				// normalise
 	RxInPitch = (RxChannel >> 2);                   //     "
 
-	while ( RxChannelsUpdatingFlag );
+//	while ( RxChannelsUpdatingFlag );
 
+	cli();
 	RxChannel = RxChannel3;
+	sei();
 	RxChannel -= Config.RxChannel3ZeroOffset;				// scale 0->100
 	RxInCollective = (RxChannel >> 3);              // 
 
-	while ( RxChannelsUpdatingFlag );
+//	while ( RxChannelsUpdatingFlag );
 
+	cli();
 	RxChannel = RxChannel4;
+	sei();
 	RxChannel -= Config.RxChannel4ZeroOffset;				// normalise
 	RxInYaw = (RxChannel >> 2);                     //     "
 
@@ -1467,7 +1429,8 @@ void output_motor_ppm(void)
 		}
 	}
 
-	if (! Armed) return;
+	// Disable this to always output signal, even when not armed, to avoid Plush beeping
+	// if (! Armed) return;
 
 	// Log PWM signal HIGH	
 	MotorStartTCNT1 = TCNT1;
