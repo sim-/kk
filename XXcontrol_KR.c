@@ -174,16 +174,15 @@ Y6
 #define ESC_RATE 450	// in Hz
 //#define ESC_RATE 495	// in Hz
 
-#define PWM_LOW_PULSE_INTERVAL  (((F_CPU / 8) / ESC_RATE) - 2000)/10
-//#define PWM_LOW_PULSE_INTERVAL  ((1000000 / ESC_RATE) - 2000)/10
+#define PWM_LOW_PULSE_INTERVAL  ((1000000 / ESC_RATE) - 2000)
 //or define by setting PWM_LOW_PULSE_INTERVAL (minimum is 1)
 
 // Adjust these:
 // 		down if you have too much gyro assistance
 // 		up if you have maxxed your gyro gain 
-#define ROLL_GAIN_DIVIDER 	32	/* Was about 64 */
-#define PITCH_GAIN_DIVIDER 	32	/* Was about 64 */
-#define YAW_GAIN_DIVIDER 	32	/* Was about 64 */
+//#define ROLL_GAIN_DIVIDER 	4	/* Was about 64 */
+//#define PITCH_GAIN_DIVIDER 	4	/* Was about 64 */
+//#define YAW_GAIN_DIVIDER 	4	/* Was about 64 */
 
 // Stick Gain
 //#define NORMAL_STICK_ROLL_GAIN		100		// Stick %, Normal: 50, Acro: 60~70
@@ -196,8 +195,14 @@ Y6
 #define UFO_STICK_YAW_GAIN			90		// Stick %, Normal: 50, Acro: 60~70, UFO: 80~90
 //#define ADC_GAIN_DIVIDER			100		// Gyro Value Range (-100~100: 150, -150~150: 225, -250~250: 375)
 
-// Stick Arming - enable this line to enable Stick arming
-#define STICK_ARMING 60
+// Stick arming and throw detection (in % * 10 eg 1000 steps)
+#define STICK_THROW 300
+
+// Gyro gain shift-right (after 32-bit multiplication of GainInADC[] value).
+#define GYRO_GAIN_SHIFT 5
+
+// Stick gain shift-right (after 32-bit multiplication of GainInADC[] value).
+#define STICK_GAIN_SHIFT 8
 
 // enable this line if you don't have Yaw gyro connected
 //#define EXTERNAL_YAW_GYRO
@@ -205,7 +210,7 @@ Y6
 // Max Collective
 // limits the maximum stick collective (range 80->100  100=Off)
 // this allows gyros to stabilise better when full throttle applied
-#define MAX_COLLECTIVE 90			// 95
+#define MAX_COLLECTIVE 816			// 95
 
 /* ----------- Main Code -----------  */
 
@@ -250,12 +255,10 @@ struct Config_Struct
 CONFIG_STRUCT Config;				// Holds configuration (from eeProm)
 
 bool GyroCalibrated;
-//volatile BOOL RxChannelsUpdatingFlag;
 
 bool Armed;
 
 uint16_t GainInADC[3];				// ADC result
-uint16_t GainIn[3];					// = GainInADC[3]/10
 
 #ifdef SINGLE_COPTER
 int16_t LowpassOutServo[3];			// Lowpass Out
@@ -269,36 +272,47 @@ int16_t LowpassOutYaw;
 uint16_t ServoPPMRateDivider = 0;
 #endif
 
-volatile uint16_t RxChannel1;		// ISR vars
-volatile uint16_t RxChannel2;
-volatile uint16_t RxChannel3;
-volatile uint16_t RxChannel4;
-
 //uint16_t RxChannel1Start;			// ISR vars
+//uint16_t RxChannel1End;
 //uint16_t RxChannel2Start;
+//uint16_t RxChannel2End;
 //uint16_t RxChannel3Start;
+//uint16_t RxChannel3End;
 //uint16_t RxChannel4Start;
+//uint16_t RxChannel4End;
 
 int16_t RxInRoll;					// program vars
 int16_t RxInPitch;
 int16_t RxInCollective;
 int16_t RxInYaw;
+int16_t LastRxInRoll;					// program vars
+int16_t LastRxInPitch;
+int16_t LastRxInYaw;
 
-register uint16_t RxChannel1Start asm("r2");			// ISR vars
-register uint16_t RxChannel2Start asm("r4");
-register uint16_t RxChannel3Start asm("r6");
-register uint16_t RxChannel4Start asm("r8");
+uint8_t rx_misses;				/* Receive PPM Fail-safe */
 
-//register int16_t RxInRoll asm("r10");					// program vars
-//register int16_t RxInPitch asm("r12");
-//register int16_t RxInCollective asm("r14");
-//register int16_t RxInYaw asm("r16");
+/* Careful: Making these volatile makes it spew r24 crap in the _middle_ of an asm volatile */
+uint16_t RxChannel1;
+uint16_t RxChannel2;
+uint16_t RxChannel3;
+uint16_t RxChannel4;
+
+register uint16_t i_tmp asm("r2");		// ISR vars
+register uint16_t RxChannel1Start asm("r4");
+register uint16_t RxChannel2Start asm("r6");
+register uint16_t RxChannel3Start asm("r8");
+register uint16_t RxChannel4Start asm("r10");
+register uint8_t i_sreg asm("r12");
+
 #ifdef TWIN_COPTER
 int16_t RxInOrgPitch;
 #endif
 
-int16_t gyroADC[3];					// Holds Gyro ADC's
-int16_t gyroZero[3] = {0,0,0};		// used for calibrating Gyros on ground
+int16_t gyroADC[3];				// Holds Gyro ADC's
+int16_t gyroZero[3] = {0,0,0};			// used for calibrating Gyros on ground
+
+int16_t integral[3];				// PID integral term
+int16_t last_error[3];				// Last proporational error
 
 uint16_t ModeDelayCounter;
 
@@ -319,10 +333,9 @@ int16_t MotorOut6;
 #endif
 
 void setup(void);
-void loop(void);
 
 void Init_ADC(void);
-void ReadGyros(bool calibrate);
+void ReadGyros();
 void CalibrateGyros(void);
 
 void ReadGainPots(void);
@@ -341,79 +354,141 @@ void eeprom_write_block_changes( const uint8_t * src, void * dest, size_t size )
 void delay_us(uint8_t time);
 void delay_ms(uint16_t time);
 
+#if 1
+
+// RX_ROLL
+ISR(PCINT2_vect,ISR_NAKED)
+{
+	if (RX_ROLL) {				// rising
+		asm volatile("lds %A0, %1" : "=r" (RxChannel1Start) : "i" (&TCNT1L));
+		asm volatile("lds %B0, %1" : "=r" (RxChannel1Start) : "i" (&TCNT1H));
+		asm volatile("reti");
+	} else {				// falling
+		asm volatile(
+			"lds %A0, %3\n"
+			"lds %B0, %4\n"
+			"in %1, __SREG__\n"
+			"sub %A0, %A2\n"
+			"sbc %B0, %B2\n"
+			"out __SREG__, %1\n"
+				: "+r" (i_tmp), "+r" (i_sreg), "+r" (RxChannel1Start)
+				: "i" (&TCNT1L), "i" (&TCNT1H));
+		RxChannel1 = i_tmp;
+	}
+	asm volatile ("reti");
+}
+
+// RX_PITCH
+ISR(INT0_vect,ISR_NAKED)
+{
+	if (RX_PITCH) {				// rising
+		asm volatile("lds %A0, %1" : "=r" (RxChannel2Start) : "i" (&TCNT1L));
+		asm volatile("lds %B0, %1" : "=r" (RxChannel2Start) : "i" (&TCNT1H));
+		asm volatile("reti");
+	} else {				// falling
+		asm volatile(
+			"lds %A0, %3\n"
+			"lds %B0, %4\n"
+			"in %1, __SREG__\n"
+			"sub %A0, %A2\n"
+			"sbc %B0, %B2\n"
+			"out __SREG__, %1\n"
+				: "+r" (i_tmp), "+r" (i_sreg), "+r" (RxChannel2Start)
+				: "i" (&TCNT1L), "i" (&TCNT1H));
+		RxChannel2 = i_tmp;
+	}
+	asm volatile ("reti");
+}
+
+// RX_COLL
+ISR(INT1_vect,ISR_NAKED)
+{
+	if (RX_COLL) {				// rising
+		asm volatile("lds %A0, %1" : "=r" (RxChannel3Start) : "i" (&TCNT1L));
+		asm volatile("lds %B0, %1" : "=r" (RxChannel3Start) : "i" (&TCNT1H));
+		asm volatile("reti");
+	} else {				// falling
+		asm volatile(
+			"lds %A0, %3\n"
+			"lds %B0, %4\n"
+			"in %1, __SREG__\n"
+			"sub %A0, %A2\n"
+			"sbc %B0, %B2\n"
+			"out __SREG__, %1\n"
+				: "+r" (i_tmp), "+r" (i_sreg), "+r" (RxChannel3Start)
+				: "i" (&TCNT1L), "i" (&TCNT1H));
+		RxChannel3 = i_tmp;
+	}
+	asm volatile ("reti");
+}
+
+// RX_YAW
+ISR(PCINT0_vect,ISR_NAKED)
+{
+	if (RX_YAW) {				// rising
+		asm volatile("lds %A0, %1" : "=r" (RxChannel4Start) : "i" (&TCNT1L));
+		asm volatile("lds %B0, %1" : "=r" (RxChannel4Start) : "i" (&TCNT1H));
+		asm volatile("reti");
+	} else {				// falling
+		asm volatile(
+			"lds %A0, %3\n"
+			"lds %B0, %4\n"
+			"in %1, __SREG__\n"
+			"sub %A0, %A2\n"
+			"sbc %B0, %B2\n"
+			"out __SREG__, %1\n"
+				: "+r" (i_tmp), "+r" (i_sreg), "+r" (RxChannel4Start)
+				: "i" (&TCNT1L), "i" (&TCNT1H));
+		RxChannel4 = i_tmp;
+	}
+	asm volatile ("reti");
+}
+#else
+
 // RX_ROLL
 ISR(PCINT2_vect)
 {
-//	register uint8_t tisp asm("r18");
-//	asm volatile("push %0" : "=r" (tisp) : "0" (tisp));
-//	tisp = SREG;
-	if ( RX_ROLL )			// rising
+	if (RX_ROLL)
 	{
 		RxChannel1Start = TCNT1;
 	} else {				// falling
-//		RxChannelsUpdatingFlag = 1;
 		RxChannel1 = TCNT1 - RxChannel1Start;
-//		RxChannelsUpdatingFlag = 0;
 	}
-//	asm volatile("out 0x3f, r0");
-//	SREG = tisp;
-//	asm volatile("pop %0" : "=r" (tisp));
 }
 
 // RX_PITCH
 ISR(INT0_vect)
 {
-	if (RX_PITCH)		
+	if (RX_PITCH)
 	{
 		RxChannel2Start = TCNT1;
 	} else {				// falling
-//		RxChannelsUpdatingFlag = 1;
 		RxChannel2 = TCNT1 - RxChannel2Start;
-//		RxChannelsUpdatingFlag = 0;
 	}
 }
 
 // RX_COLL
 ISR(INT1_vect)
 {
-	if (RX_COLL)		
+	if (RX_COLL)
 	{
 		RxChannel3Start = TCNT1;
-
 	} else {				// falling
-//		RxChannelsUpdatingFlag = 1;
 		RxChannel3 = TCNT1 - RxChannel3Start;
-//		RxChannelsUpdatingFlag = 0;
 	}
 }
 
 // RX_YAW
 ISR(PCINT0_vect)
 {
-	
 	if ( RX_YAW )			// rising
 	{
 		RxChannel4Start = TCNT1;
-
 	} else {				// falling
-//		RxChannelsUpdatingFlag = 1;
 		RxChannel4 = TCNT1 - RxChannel4Start;
-//		RxChannelsUpdatingFlag = 0;
 	}
 }
-
-
-int main(void)
-{
-	setup();
-
-	while (1)
-	{
-		loop();
-	}
-
-	return 1;
-}
+#endif
 
 void setup(void)
 {
@@ -446,6 +521,9 @@ void setup(void)
 #endif
 	LED_DIR 			= OUTPUT;
 
+// REMOVE ME -------------------------------------------------------------------------------------------------------------------------
+	M6_DIR 				= OUTPUT;
+
 	LED			= 0;
 	RX_ROLL 	= 0;
 	RX_PITCH 	= 0;
@@ -466,9 +544,9 @@ void setup(void)
 
 	// timer0 (8bit) - run @ 8MHz
 	// used to control ESC/servo pulse length
-	TCCR0A = 0;						// normal operation
-	TCCR0B = (1 << CS00);			// clk/0
-	TIMSK0 = 0; 					// no interrupts
+//	TCCR0A = 0;						// normal operation
+//	TCCR0B = (1 << CS00);			// clk/0
+//	TIMSK0 = 0; 					// no interrupts
 
 	// timer1 (16bit) - run @ 1Mhz
 	// used to measure Rx Signals & control ESC/servo output rate
@@ -493,26 +571,25 @@ void setup(void)
 #endif
 
 #ifdef SINGLE_COPTER
-	LowpassOutServo[ROLL]	= 84;					// Center
-	LowpassOutServo[PITCH]	= 84;					// Center
-	LowpassOutServo[YAW]	= 84;					// Center
+	LowpassOutServo[ROLL]	= 840;					// Center
+	LowpassOutServo[PITCH]	= 840;					// Center
+	LowpassOutServo[YAW]	= 840;					// Center
 #elif defined(DUAL_COPTER)
-	LowpassOutServo[ROLL]	= 50;					// Center
-	LowpassOutServo[PITCH]	= 50;					// Center
+	LowpassOutServo[ROLL]	= 500;					// Center
+	LowpassOutServo[PITCH]	= 500;					// Center
 #elif defined(TWIN_COPTER)
-	LowpassOutServo[0]		= 50;					// Pitch
-	LowpassOutServo[1]		= 50;					// Yaw
+	LowpassOutServo[0]		= 500;					// Pitch
+	LowpassOutServo[1]		= 500;					// Yaw
 #elif defined(TRI_COPTER)
-	LowpassOutYaw			= 50;					// Center
+	LowpassOutYaw			= 500;					// Center
 #endif
 
-	Initial_EEPROM_Config_Load();					// loads config at start-up 
+	Initial_EEPROM_Config_Load();					// loads config at start-up
 
 	Init_ADC();
 
 	GyroCalibrated = false;
 	Armed = false;
-//	RxChannelsUpdatingFlag = 0;
 
 	RxChannel1 = Config.RxChannel1ZeroOffset;		// prime the channels 1520;
 	RxChannel2 = Config.RxChannel2ZeroOffset;		// 1520;
@@ -524,7 +601,7 @@ void setup(void)
 	delay_ms(150);
 	LED = 0;
 
-	sei();											// Global Interrupts 
+	sei();											// Global Interrupts
 
 	// 2 second delay
 	delay_ms(1500);
@@ -538,7 +615,7 @@ void setup(void)
 		Set_EEPROM_Default_Config();
 
 		while ( 1 );
-	} 
+	}
 
 	// Stick Centering
 	if (GainInADC[PITCH] < (UC_ADC_MAX*5)/100)		// less than 5%
@@ -603,27 +680,27 @@ void setup(void)
 		{
 			RxGetChannels();
 
-			if (RxInRoll < -30) {	// normal(left)
+			if (RxInRoll < -STICK_THROW) {	// normal(left)
 				Config.RollGyroDirection = GYRO_NORMAL;
 				Save_Config_to_EEPROM();
 				LED = 1;
-			} if (RxInRoll > 30) {	// reverse(right)
+			} if (RxInRoll > STICK_THROW) {	// reverse(right)
 				Config.RollGyroDirection = GYRO_REVERSED;
 				Save_Config_to_EEPROM();
 				LED = 1;
-			} else if (RxInPitch < -30) { // normal(up)
+			} else if (RxInPitch < -STICK_THROW) { // normal(up)
 				Config.PitchGyroDirection = GYRO_NORMAL;
 				Save_Config_to_EEPROM();
 				LED = 1;
-			} else if (RxInPitch > 30) { // reverse(down)
+			} else if (RxInPitch > STICK_THROW) { // reverse(down)
 				Config.PitchGyroDirection = GYRO_REVERSED;
 				Save_Config_to_EEPROM();
 				LED = 1;
-			} else if (RxInYaw < -30) { // normal(left)
+			} else if (RxInYaw < -STICK_THROW) { // normal(left)
 				Config.YawGyroDirection = GYRO_NORMAL;
 				Save_Config_to_EEPROM();
 				LED = 1;
-			} else if (RxInYaw > 30) { // reverse(right)
+			} else if (RxInYaw > STICK_THROW) { // reverse(right)
 				Config.YawGyroDirection = GYRO_REVERSED;
 				Save_Config_to_EEPROM();
 				LED = 1;
@@ -648,38 +725,33 @@ void setup(void)
 		}
 
 		Armed = true;	// override so that output_motor_pwm() won't quit early
-		PWM_Low_Pulse_Interval = ((1000000UL / 50) - 2000)/10;	// set to 50Hz
-#if defined(SINGLE_COPTER) || defined(DUAL_COPTER) || defined(TWIN_COPTER) || defined(TRI_COPTER)
-		ServoPPMRateDivider = 1;	// since we have already set to 50Hz
-#endif
-		
 		while (1)	// loop forever
 		{
 			RxGetChannels();
 #ifdef SINGLE_COPTER
 			MotorOut1 = RxInCollective;
-			MotorOut2 = 140;		// Center: 140
-			MotorOut3 = 140;
-			MotorOut4 = 140;
-			MotorOut5 = 140;
+			MotorOut2 = 1400;		// Center: 140
+			MotorOut3 = 1400;
+			MotorOut4 = 1400;
+			MotorOut5 = 1400;
 #elif defined(DUAL_COPTER)
 			MotorOut1 = RxInCollective;
 			MotorOut2 = RxInCollective;
-			MotorOut3 = 50;			// Center: 50
-			MotorOut4 = 50;
+			MotorOut3 = 500;		// Center: 50
+			MotorOut4 = 500;
 #elif defined(TWIN_COPTER)
 			MotorOut1 = RxInCollective;
 			MotorOut2 = RxInCollective;
-			MotorOut3 = 50;			// Center: 50
-			MotorOut4 = 50;
-			MotorOut5 = 50;
-			MotorOut6 = 50;			// Center: 50, Reverse
+			MotorOut3 = 500;		// Center: 50
+			MotorOut4 = 500;
+			MotorOut5 = 500;
+			MotorOut6 = 500;		// Center: 50, Reverse
 #elif defined(TRI_COPTER)
 			MotorOut1 = RxInCollective;
 			MotorOut2 = RxInCollective;
 			MotorOut3 = RxInCollective;
-			MotorOut4 = 50;			// Center: 50
-			MotorOut5 = 50;			// Center: 50, Reverse
+			MotorOut4 = 500;		// Center: 50
+			MotorOut5 = 500;		// Center: 50, Reverse
 #elif defined(QUAD_COPTER) || defined(QUAD_X_COPTER) || defined(Y4_COPTER)
 			MotorOut1 = RxInCollective;
 			MotorOut2 = RxInCollective;
@@ -701,24 +773,27 @@ void setup(void)
 	}
 }
 
-void loop(void)
+static inline void loop(void)
 {
 //	static uint8_t i;
 	static uint16_t Change_Arming=0;
 	static uint8_t Arming_TCNT2=0;
+	int16_t error,emax = 1023;
+	int16_t imax,derivative;
 
+M6 = 1;
 	RxGetChannels();
 
-	if (RxInCollective < 0) {
+	if (RxInCollective <= 0) {
 		// check for stick arming (Timer2 @ 8MHz/1024 = 7812.5KHz)
 		// arm: yaw right (>60), dis-arm: yaw left (<-60)
 		Change_Arming += (uint8_t) (TCNT2 - Arming_TCNT2);
 		Arming_TCNT2 = TCNT2;
 
 		if (Armed) {		// nb to switch to Right-Side Arming: if (!Armed)
-			if (RxInYaw<STICK_ARMING || abs(RxInPitch) > 30) 	Change_Arming = 0;		// re-set count
+			if (RxInYaw<STICK_THROW || abs(RxInPitch) > STICK_THROW) 	Change_Arming = 0;		// re-set count
 		} else {
-			if (RxInYaw>-STICK_ARMING || abs(RxInPitch) > 30) 	Change_Arming = 0;		// re-set count
+			if (RxInYaw>-STICK_THROW || abs(RxInPitch) > STICK_THROW) 	Change_Arming = 0;		// re-set count
 		}
 
 		// 3Sec / 0.000128 = 23437 = 0x5B8D or 
@@ -742,9 +817,9 @@ void loop(void)
 		}
 
 		// --- Calibrate gyro when collective below 1% ---
-		//if ( RxInCollective < 1 && Armed && abs(RxInRoll) <20 && abs(RxInPitch) <20)
+		//if ( RxInCollective < 1 && Armed && abs(RxInRoll) <200 && abs(RxInPitch) <200)
 		// --- Calibrate gyro when Thr: Low, Elevator: Down, Rudder: Left ---
-		if (Armed && RxInYaw < -STICK_ARMING && RxInPitch > STICK_ARMING)
+		if (Armed && RxInYaw < -STICK_THROW && RxInPitch > STICK_THROW)
 		{
 			if (ModeDelayCounter==0)
 			{
@@ -774,37 +849,55 @@ void loop(void)
 		}
 	}
 	//--- Read gyros ---
-	ReadGyros(false);
+
+	read_adc( 2 );			// read roll gyro ADC2
+	gyroADC[ROLL] = ADCW;
+
+	read_adc( 1 );			// read pitch gyro ADC1
+	gyroADC[PITCH] = ADCW;
+
+	read_adc( 0 );			// read yaw gyro ADC0
+	gyroADC[YAW] = ADCW;
+
+//	ReadGyros();
+	gyroADC[ROLL]-= gyroZero[ROLL];				//remove offset from gyro output
+	gyroADC[PITCH]-= gyroZero[PITCH];			//remove offset from gyro output
+#ifndef EXTERNAL_YAW_GYRO
+	gyroADC[YAW]-= gyroZero[YAW];				//remove offset from gyro output
+#endif
 
 	//--- Start mixing by setting collective to motor input 1,2,3,4 and 5,6
+
+	RxInCollective = (RxInCollective * 10) >> 3;	// 0-800 -> 0-1000
 #ifndef SINGLE_COPTER
-	if (RxInCollective > MAX_COLLECTIVE) RxInCollective = MAX_COLLECTIVE;
+	if (RxInCollective > MAX_COLLECTIVE)
+		RxInCollective = MAX_COLLECTIVE;
 #endif
 
 #ifdef SINGLE_COPTER
 	MotorOut1 = RxInCollective;
-	MotorOut2 = 84;		// 84;
-	MotorOut3 = 84;		// 84;
-	MotorOut4 = 94;		// 84 + 84/8; Adjust LowPassOutValue
-	MotorOut5 = 94;		// 84 + 84/8; Adjust LowPassOutValue
+	MotorOut2 = 840;	// 84;
+	MotorOut3 = 840;	// 84;
+	MotorOut4 = 940;	// 84 + 84/8; Adjust LowPassOutValue
+	MotorOut5 = 940;	// 84 + 84/8; Adjust LowPassOutValue
 #elif defined(DUAL_COPTER)
 	MotorOut1 = RxInCollective;
 	MotorOut2 = RxInCollective;
-	MotorOut3 = 50;
-	MotorOut4 = 50;
+	MotorOut3 = 500;
+	MotorOut4 = 500;
 #elif defined(TWIN_COPTER)
 	MotorOut1 = RxInCollective;
 	MotorOut2 = RxInCollective;
-	MotorOut3 = 50;
-	MotorOut4 = 50;
-	MotorOut5 = 50;		// Optional
-	MotorOut6 = 50;		// Optional
+	MotorOut3 = 500;
+	MotorOut4 = 500;
+	MotorOut5 = 500;	// Optional
+	MotorOut6 = 500;	// Optional
 #elif defined(TRI_COPTER)
 	MotorOut1 = RxInCollective;
 	MotorOut2 = RxInCollective;
 	MotorOut3 = RxInCollective;
-	MotorOut4 = 50;
-	MotorOut5 = 50;		// Reverse
+	MotorOut4 = 500;
+	MotorOut5 = 500;	// Reverse
 #elif defined(QUAD_COPTER) || defined(QUAD_X_COPTER)
 	MotorOut1 = RxInCollective;
 	MotorOut2 = RxInCollective;
@@ -824,17 +917,36 @@ void loop(void)
 	MotorOut6 = RxInCollective;
 #endif
 
+	imax = RxInCollective;
+	if (imax < 0)
+		imax = 0;
+	imax>>= 3;	/* 1000 -> 200 */
+
 	//--- Calculate roll gyro output ---
 	// nb IF YOU CHANGE THIS CODE, YOU MUST REMOVE PROPS BEFORE TESTING !!!
-	gyroADC[ROLL] = gyroADC[ROLL] * GainIn[ROLL];
-	gyroADC[ROLL] /= ROLL_GAIN_DIVIDER;
-//	RxInRoll = (RxInRoll * StickRollGain / 100);	// Stick Controll %
+	RxInRoll = ((int32_t)RxInRoll * (uint32_t)GainInADC[ROLL]) >> STICK_GAIN_SHIFT;
+	gyroADC[ROLL] = ((int32_t)gyroADC[ROLL] * (uint32_t)GainInADC[ROLL]) >> GYRO_GAIN_SHIFT;
+	if (Config.RollGyroDirection == GYRO_NORMAL)
+		gyroADC[ROLL] = -gyroADC[ROLL];
 
-	//--- (Add)Adjust roll gyro output to motors
-	if (Config.RollGyroDirection == GYRO_NORMAL) {
-		RxInRoll += gyroADC[ROLL];
-	} else {
-		RxInRoll -= gyroADC[ROLL];
+	if (GyroCalibrated) {
+		if (0) {
+			error = RxInRoll - gyroADC[ROLL];
+			if (error > emax)
+				error = emax;
+			else if (error < -emax)
+				error = -emax;
+			integral[ROLL]+= error;
+			if (integral[ROLL] > imax)
+				integral[ROLL] = imax;
+			else if (integral[ROLL] < -imax)
+				integral[ROLL] = -imax;
+			derivative = error - last_error[ROLL];
+			last_error[ROLL] = error;
+			RxInRoll+= error + (integral[ROLL] >> 2) + (derivative >> 2);
+		} else {
+			RxInRoll-= gyroADC[ROLL];
+		}
 	}
 
 #ifdef SINGLE_COPTER
@@ -887,15 +999,29 @@ void loop(void)
 
 	//--- Calculate pitch gyro output ---
 	// nb IF YOU CHANGE THIS CODE, YOU MUST REMOVE PROPS BEFORE TESTING !!!
-	gyroADC[PITCH] = gyroADC[PITCH] * GainIn[PITCH];
-	gyroADC[PITCH] /= PITCH_GAIN_DIVIDER; 
-//	RxInPitch = (RxInPitch * StickPitchGain / 100);	// Stick Controll %
+	RxInPitch = ((int32_t)RxInPitch * (uint32_t)GainInADC[PITCH]) >> STICK_GAIN_SHIFT;
+	gyroADC[PITCH] = ((int32_t)gyroADC[PITCH] * (uint32_t)GainInADC[PITCH]) >> GYRO_GAIN_SHIFT;
+	if (Config.PitchGyroDirection == GYRO_NORMAL)
+		gyroADC[PITCH] = -gyroADC[PITCH];
 
-	//--- (Add)Adjust pitch gyro output to motors
-	if (Config.PitchGyroDirection == GYRO_NORMAL) {	
-		RxInPitch += gyroADC[PITCH];
-	} else {
-		RxInPitch -= gyroADC[PITCH];
+	if (GyroCalibrated) {
+		if (0) {
+			error = RxInPitch - gyroADC[PITCH];
+			if (error > emax)
+				error = emax;
+			else if (error < -emax)
+				error = -emax;
+			integral[PITCH]+= error;
+			if (integral[PITCH] > imax)
+				integral[PITCH] = imax;
+			else if (integral[PITCH] < -imax)
+				integral[PITCH] = -imax;
+			derivative = error - last_error[PITCH];
+			last_error[PITCH] = error;
+			RxInPitch+= error + (integral[PITCH] >> 2) + (derivative >> 2);
+		} else {
+			RxInPitch-= gyroADC[PITCH];
+		}
 	}
 
 #ifdef SINGLE_COPTER
@@ -925,7 +1051,7 @@ void loop(void)
 	#endif
 
 	// Stick Only, Optional
-	RxInOrgPitch = abs(RxInOrgPitch * StickPitchGain / 100);	// Stick Controll %
+	RxInOrgPitch = abs(RxInOrgPitch);
 	MotorOut5 += RxInOrgPitch;							// Tain Servo-Optional, Down Only
 	MotorOut6 -= RxInOrgPitch;							// Tain Servo-Optional, Down Only (Reverse)
 #elif defined(TRI_COPTER)
@@ -966,15 +1092,25 @@ void loop(void)
 #endif
 
 	//--- Calculate yaw gyro output ---
-	gyroADC[YAW] = gyroADC[YAW] * GainIn[YAW];
-	gyroADC[YAW] /= YAW_GAIN_DIVIDER;
-//	RxInYaw = (RxInYaw * StickYawGain / 100);			// Stick Controll %
+	RxInYaw = ((int32_t)RxInYaw * (uint32_t)GainInADC[YAW]) >> STICK_GAIN_SHIFT;
+	gyroADC[YAW] = ((int32_t)gyroADC[YAW] * (uint32_t)GainInADC[YAW]) >> GYRO_GAIN_SHIFT;
+	if (Config.YawGyroDirection == GYRO_NORMAL)
+		gyroADC[YAW] = -gyroADC[YAW];
 
-	//--- (Add)Adjust yaw gyro output to motors
-	if (Config.YawGyroDirection == GYRO_NORMAL) {		// scale gyro output
-		RxInYaw += gyroADC[YAW];
-	} else {
-		RxInYaw -= gyroADC[YAW];
+	if (GyroCalibrated) {
+		error = RxInYaw - gyroADC[YAW];
+		if (error > emax)
+			error = emax;
+		else if (error < -emax)
+			error = -emax;
+		integral[YAW]+= error;
+		if (integral[YAW] > imax)
+			integral[YAW] = imax;
+		else if (integral[YAW] < -imax)
+			integral[YAW] = -imax;
+		derivative = error - last_error[YAW];
+		last_error[YAW] = error;
+		RxInYaw+= error + (integral[YAW] >> 4) + (derivative >> 4);
 	}
 
 #ifdef SINGLE_COPTER
@@ -1023,11 +1159,11 @@ void loop(void)
 	MotorOut3 -= RxInYaw;
 	MotorOut4 += RxInYaw;
 #elif defined(Y4_COPTER)
-	if (( MotorOut3 - RxInYaw ) < 10) RxInYaw = MotorOut3 - 10;		// Yaw Range Limit
-	if (( MotorOut3 - RxInYaw ) > 100) RxInYaw = MotorOut3 - 100;	// Yaw Range Limit
+	if (( MotorOut3 - RxInYaw ) < 100) RxInYaw = MotorOut3 - 100;		// Yaw Range Limit
+	if (( MotorOut3 - RxInYaw ) > 1000) RxInYaw = MotorOut3 - 1000;	// Yaw Range Limit
 
-	if (( MotorOut4 + RxInYaw ) < 10) RxInYaw = 10 - MotorOut4;		// Yaw Range Limit
-	if (( MotorOut4 + RxInYaw ) > 100) RxInYaw = 100 - MotorOut4;	// Yaw Range Limit
+	if (( MotorOut4 + RxInYaw ) < 100) RxInYaw = 100 - MotorOut4;		// Yaw Range Limit
+	if (( MotorOut4 + RxInYaw ) > 1000) RxInYaw = 1000 - MotorOut4;	// Yaw Range Limit
 
 	MotorOut3 -= RxInYaw;
 	MotorOut4 += RxInYaw;
@@ -1047,29 +1183,40 @@ void loop(void)
 	MotorOut6 += RxInYaw;
 #endif
 
+#if defined(TRI_COPTER)
+	/*
+	 * Rather than clipping the motor outputs and causing instability at throttle saturation,
+	 * pull the throttle down of the other motors. Below, we limit the minimum to idle. This
+	 * gives priority to stabilization without arbitrary collective limiting.
+	 */
+	{
+		int16_t MotorMax = MotorOut1;
+		if (MotorOut2 > MotorMax)
+			MotorMax = MotorOut2;
+		if (MotorOut3 > MotorMax)
+			MotorMax = MotorOut2;
+		MotorMax-= 1000;
+		if (MotorMax > 0) {
+			MotorOut1-= MotorMax;
+			MotorOut2-= MotorMax;
+			MotorOut3-= MotorMax;
+		}
+	}
+#endif
+
+
 	//--- Limit the lowest value to avoid stopping of motor if motor value is under-saturated ---
-#if defined(DUAL_COPTER)
-	if ( MotorOut1 < 10 )	MotorOut1 = 10;					// this is the motor idle level
-	if ( MotorOut2 < 10 )	MotorOut2 = 10;	
-#elif defined(TWIN_COPTER)
-	if ( MotorOut1 < 10 )	MotorOut1 = 10;					// this is the motor idle level
-	if ( MotorOut2 < 10 )	MotorOut2 = 10;	
-#elif defined(TRI_COPTER)
-	if ( MotorOut1 < 10 )	MotorOut1 = 10;					// this is the motor idle level
-	if ( MotorOut2 < 10 )	MotorOut2 = 10;	
-	if ( MotorOut3 < 10 )	MotorOut3 = 10;
-#elif defined(QUAD_COPTER) || defined(QUAD_X_COPTER) || defined(Y4_COPTER)
-	if ( MotorOut1 < 10 )	MotorOut1 = 10;					// this is the motor idle level
-	if ( MotorOut2 < 10 )	MotorOut2 = 10;	
-	if ( MotorOut3 < 10 )	MotorOut3 = 10;
-	if ( MotorOut4 < 10 )	MotorOut4 = 10;	
-#elif defined(HEX_COPTER) ||  defined(Y6_COPTER)
-	if ( MotorOut1 < 10 )	MotorOut1 = 10;					// this is the motor idle level
-	if ( MotorOut2 < 10 )	MotorOut2 = 10;	
-	if ( MotorOut3 < 10 )	MotorOut3 = 10;
-	if ( MotorOut4 < 10 )	MotorOut4 = 10;	
-	if ( MotorOut5 < 10 )	MotorOut5 = 10;	
-	if ( MotorOut6 < 10 )	MotorOut6 = 10;	
+	if ( MotorOut1 < 100 )	MotorOut1 = 100;					// this is the motor idle level
+	if ( MotorOut2 < 100 )	MotorOut2 = 100;	
+#if defined(TRI_COPTER) || defined(QUAD_COPTER) || defined(QUAD_X_COPTER) || defined(Y4_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
+	if ( MotorOut3 < 100 )	MotorOut3 = 100;
+#endif
+#if defined(QUAD_COPTER) || defined(QUAD_X_COPTER) || defined(Y4_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
+	if ( MotorOut4 < 100 )	MotorOut4 = 100;
+#endif
+#if defined(HEX_COPTER) ||  defined(Y6_COPTER)
+	if ( MotorOut5 < 100 )	MotorOut5 = 100;	
+	if ( MotorOut6 < 100 )	MotorOut6 = 100;	
 #endif
 
 	//--- Output to motor ESC's ---
@@ -1077,29 +1224,29 @@ void loop(void)
 	{														// or  if gyros not calibrated
 #ifdef SINGLE_COPTER
 		MotorOut1 = 0;
-		MotorOut2 = 84;
-		MotorOut3 = 84;
-		MotorOut4 = 84;
-		MotorOut5 = 84;
+		MotorOut2 = 840;
+		MotorOut3 = 840;
+		MotorOut4 = 840;
+		MotorOut5 = 840;
 #elif defined(DUAL_COPTER)
 		MotorOut1 = 0;
 		MotorOut2 = 0;
-		MotorOut3 = 50;
-		MotorOut4 = 50;
+		MotorOut3 = 500;
+		MotorOut4 = 500;
 #elif defined(TWIN_COPTER)
 		MotorOut1 = 0;
 		MotorOut2 = 0;
-		MotorOut3 = 50;
-		MotorOut4 = 50;
-		MotorOut5 = 50;
-		MotorOut6 = 50;
+		MotorOut3 = 500;
+		MotorOut4 = 500;
+		MotorOut5 = 500;
+		MotorOut6 = 500;
 #elif defined(TRI_COPTER)
 		MotorOut1 = 0;
 		MotorOut2 = 0;
 		MotorOut3 = 0;
 		if (!Armed) {
-			MotorOut4 = 50;
-			MotorOut5 = 50;
+			MotorOut4 = 500;
+			MotorOut5 = 500;
 		}
 #elif defined(QUAD_COPTER) || defined(QUAD_X_COPTER) || defined(Y4_COPTER)
 		MotorOut1 = 0;
@@ -1117,7 +1264,20 @@ void loop(void)
 	}
 
 	// Disable if Armed here so we always send signal to avoid Plush beeping: if (armed)
+M6 = 0;
 	output_motor_ppm();		// output ESC signal
+}
+
+int main(void)
+{
+	setup();
+
+	while (1)
+	{
+		loop();
+	}
+
+	return 1;
 }
 
 void Init_ADC(void)
@@ -1126,22 +1286,22 @@ void Init_ADC(void)
 	ADCSRB 	= 0b00000000; 	// ADC Control and Status Register B - ADTS2:0
 }
 
+/*
+ * ADC reads 10-bit results (0-1023), so we cannot just multiply Gyro ADC
+ * by Gain ADC, or we can wrap results.  Full ADC range in a 16 bit value
+ * is ADC shifted left by 6, so we scale the gain to 6-bit by shifting
+ * right by 10 - 6 = 4 bits.
+ */
 void ReadGainPots(void)
 {
 	read_adc( 3 );			// read roll gain ADC3
-	GainInADC[ROLL] = ADCL;
-	GainInADC[ROLL] += ((uint16_t) ADCH <<8);
-	GainIn[ROLL] = GainInADC[ROLL] / 10;
+	GainInADC[ROLL] = ADCW;
 
 	read_adc( 4 );			// read pitch gain ADC4
-	GainInADC[PITCH] = ADCL;
-	GainInADC[PITCH] += ((uint16_t) ADCH <<8);
-	GainIn[PITCH] = GainInADC[PITCH] / 10;
+	GainInADC[PITCH] = ADCW;
 
 	read_adc( 5 );			// read yaw gain ADC5
-	GainInADC[YAW] = ADCL;
-	GainInADC[YAW] += ((uint16_t) ADCH <<8);
-	GainIn[YAW] = GainInADC[YAW] / 10;
+	GainInADC[YAW] = ADCW;
 }
 
 void read_adc(uint8_t channel)
@@ -1152,25 +1312,19 @@ void read_adc(uint8_t channel)
 	while (ADCSRA & (1 << ADSC));	// wait to complete
 }
 
-void ReadGyros(bool calibrate)
+void ReadGyros()
 {
 	read_adc( 2 );			// read roll gyro ADC2
-	gyroADC[ROLL] = ADCL;
-	gyroADC[ROLL] += ((uint16_t) ADCH <<8);
-	if (!calibrate) gyroADC[ROLL] 	-= gyroZero[ROLL];				//remove offset from gyro output
+	gyroADC[ROLL] = ADCW;
 
 	read_adc( 1 );			// read pitch gyro ADC1
-	gyroADC[PITCH] = ADCL;
-	gyroADC[PITCH] += ((uint16_t) ADCH <<8);
-	if (!calibrate) gyroADC[PITCH] -= gyroZero[PITCH];				//remove offset from gyro output
+	gyroADC[PITCH] = ADCW;
 
 #ifdef EXTERNAL_YAW_GYRO
 	gyroADC[YAW] = 0;
 #else
 	read_adc( 0 );			// read yaw gyro ADC0
-	gyroADC[YAW] = ADCL;
-	gyroADC[YAW] += ((uint16_t) ADCH <<8);
-	if (!calibrate) gyroADC[YAW]	-= gyroZero[YAW];				//remove offset from gyro output
+	gyroADC[YAW] = ADCW;
 #endif
 }
 
@@ -1187,69 +1341,49 @@ void CalibrateGyros(void)
 
 	for (i=0;i<32;i++)
 	{
-		ReadGyros(true);
-	
+		ReadGyros();
+
 		gyroZero[ROLL] 	+= gyroADC[ROLL];						
 		gyroZero[PITCH] += gyroADC[PITCH];	
 		gyroZero[YAW] 	+= gyroADC[YAW];
 	}
 
-	gyroZero[ROLL] 	= (gyroZero[ROLL] >> 5);						
+	gyroZero[ROLL] 	= (gyroZero[ROLL] >> 5);
 	gyroZero[PITCH] = (gyroZero[PITCH] >> 5);
 	gyroZero[YAW] 	= (gyroZero[YAW] >> 5);
 
 	GyroCalibrated = true;
 #ifdef SINGLE_COPTER
-	LowpassOutServo[ROLL]	= 84;					// Center
-	LowpassOutServo[PITCH]	= 84;					// Center
-	LowpassOutServo[YAW]	= 84;					// Center
+	LowpassOutServo[ROLL]	= 840;					// Center
+	LowpassOutServo[PITCH]	= 840;					// Center
+	LowpassOutServo[YAW]	= 840;					// Center
 #elif defined(DUAL_COPTER)
-	LowpassOutServo[ROLL]	= 50;					// Center
-	LowpassOutServo[PITCH]	= 50;					// Center
+	LowpassOutServo[ROLL]	= 500;					// Center
+	LowpassOutServo[PITCH]	= 500;					// Center
 #elif defined(TWIN_COPTER)
-	LowpassOutServo[0]		= 50;					// Center
-	LowpassOutServo[1]		= 50;					// Center
+	LowpassOutServo[0]		= 500;					// Center
+	LowpassOutServo[1]		= 500;					// Center
 #elif defined(TRI_COPTER)
-	LowpassOutYaw			= 50;					// Center
+	LowpassOutYaw			= 500;					// Center
 #endif
+	ReadGyros();
 }
 
 //--- Get and scale RX channel inputs ---
 void RxGetChannels(void)
 {
-	static int16_t RxChannel;
-
-//	while ( RxChannelsUpdatingFlag );
-
 	cli();
-	RxChannel = RxChannel1;
+	RxInRoll = RxChannel1 - Config.RxChannel1ZeroOffset;
 	sei();
-	RxChannel -= Config.RxChannel1ZeroOffset;				// normalise
-	RxInRoll = (RxChannel >> 2);                    //     "
-
-//	while ( RxChannelsUpdatingFlag );
-
 	cli();
-	RxChannel = RxChannel2;
+	RxInPitch = RxChannel2 - Config.RxChannel1ZeroOffset;
 	sei();
-	RxChannel -= Config.RxChannel2ZeroOffset;				// normalise
-	RxInPitch = (RxChannel >> 2);                   //     "
-
-//	while ( RxChannelsUpdatingFlag );
-
 	cli();
-	RxChannel = RxChannel3;
+	RxInCollective = RxChannel3 - Config.RxChannel3ZeroOffset;
 	sei();
-	RxChannel -= Config.RxChannel3ZeroOffset;				// scale 0->100
-	RxInCollective = (RxChannel >> 3);              // 
-
-//	while ( RxChannelsUpdatingFlag );
-
 	cli();
-	RxChannel = RxChannel4;
+	RxInYaw = RxChannel4 - Config.RxChannel4ZeroOffset;
 	sei();
-	RxChannel -= Config.RxChannel4ZeroOffset;				// normalise
-	RxInYaw = (RxChannel >> 2);                     //     "
 
 #ifdef TWIN_COPTER
 	RxInOrgPitch = RxInPitch;
@@ -1258,14 +1392,12 @@ void RxGetChannels(void)
 
 void output_motor_ppm(void)
 {
-	static uint8_t i;
-	static uint16_t MotorStartTCNT1, ElapsedTCNT1;
-	static int16_t MotorAdjust;
-	static uint16_t PWM_Low_Count;
-	static int8_t num_of_10uS;	
+	static uint16_t MotorStartTCNT1;
 #if defined(SINGLE_COPTER) || defined(DUAL_COPTER) || defined(TWIN_COPTER) || defined(TRI_COPTER)
 	static uint8_t ServoPPMRateCount;
 #endif
+	uint16_t ElapsedTCNT1;
+	uint16_t MotorAdjust;
 
 	// if ESC's are high, we need to turn them off
 	if (output_motor_high)
@@ -1274,45 +1406,45 @@ void output_motor_ppm(void)
 		// set motor limits (0 -> 100)
 		// set servo limits (0 -> 200)
 		if ( MotorOut1 < 0 ) MotorOut1 = 0;
-		else if ( MotorOut1 > 100 ) MotorOut1 = 100;
+		else if ( MotorOut1 > 1000 ) MotorOut1 = 1000;
 		if ( MotorOut2 < 0 ) MotorOut2 = 0;
-		else if ( MotorOut2 > 200 ) MotorOut2 = 200;
+		else if ( MotorOut2 > 2000 ) MotorOut2 = 2000;
 		if ( MotorOut3 < 0 ) MotorOut3 = 0;
-		else if ( MotorOut3 > 200 ) MotorOut3 = 200;
+		else if ( MotorOut3 > 2000 ) MotorOut3 = 2000;
 		if ( MotorOut4 < 0 ) MotorOut4 = 0;
-		else if ( MotorOut4 > 200 ) MotorOut4 = 200;
+		else if ( MotorOut4 > 2000 ) MotorOut4 = 2000;
 		if ( MotorOut5 < 0 ) MotorOut5 = 0;
-		else if ( MotorOut5 > 200 ) MotorOut5 = 200;
+		else if ( MotorOut5 > 2000 ) MotorOut5 = 2000;
 #else
 		// set motor limits (0 -> 100)
 		if ( MotorOut1 < 0 ) MotorOut1 = 0;
-		else if ( MotorOut1 > 100 ) MotorOut1 = 100;
+		else if ( MotorOut1 > 1000 ) MotorOut1 = 1000;
 		if ( MotorOut2 < 0 ) MotorOut2 = 0;
-		else if ( MotorOut2 > 100 ) MotorOut2 = 100;
+		else if ( MotorOut2 > 1000 ) MotorOut2 = 1000;
 		if ( MotorOut3 < 0 ) MotorOut3 = 0;
-		else if ( MotorOut3 > 100 ) MotorOut3 = 100;
+		else if ( MotorOut3 > 1000 ) MotorOut3 = 1000;
 		if ( MotorOut4 < 0 ) MotorOut4 = 0;
-		else if ( MotorOut4 > 100 ) MotorOut4 = 100;
+		else if ( MotorOut4 > 1000 ) MotorOut4 = 1000;
 	#if defined(TWIN_COPTER) || defined(TRI_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
 		if ( MotorOut5 < 0 ) MotorOut5 = 0;
-		else if ( MotorOut5 > 100 ) MotorOut5 = 100;
+		else if ( MotorOut5 > 1000 ) MotorOut5 = 1000;
 	#endif
 	#if defined(TWIN_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
 		if ( MotorOut6 < 0 ) MotorOut6 = 0;
-		else if ( MotorOut6 > 100 ) MotorOut6 = 100;
+		else if ( MotorOut6 > 1000 ) MotorOut6 = 1000;
 	#endif
 #endif
 
 		// now calculate the time already passed that Motors were HIGH
-		ElapsedTCNT1 = (TCNT1 - MotorStartTCNT1);
+//		ElapsedTCNT1 = (TCNT1 - MotorStartTCNT1);
 
 		// start output timer
-		TIFR0 &= ~(1 << TOV0);			// clr overflow
-		TCNT0 = 0;						// reset counter
+//		TIFR0 &= ~(1 << TOV0);			// clr overflow
+//		TCNT0 = 0;						// reset counter
 
 		// convert into 10uS intervals
-		num_of_10uS = (ElapsedTCNT1 / 10) + 1;
-		MotorAdjust = 100 - num_of_10uS;
+//		num_of_10uS = (ElapsedTCNT1 / 10) + 1;
+		MotorAdjust = 1000; // - num_of_10uS;
 
 #ifdef SINGLE_COPTER
 		// add adjustment (1mS - time already gone) to 1 channel
@@ -1338,102 +1470,37 @@ void output_motor_ppm(void)
 		// Servo = 0 - 200
 		// Pulse len = 0 -> 2.3ms
 
-		TIFR0 &= ~(1 << TOV0);			// clr overflow
-		TCNT0 = 0;						// reset counter
+		//TIFR0 &= ~(1 << TOV0);			// clr overflow
+		//TCNT0 = 0;						// reset counter
 
-#ifdef SINGLE_COPTER
-		for (i=0;i<200;i++)	
-		{
-			while (TCNT0 < 80);			// 10uS @ 8MHz = 80 // 10 @ 1MHz = 10uS
-			TCNT0 -= 80;
-
-			if (MotorOut1)
-			{
-				MotorOut1--;
-				if (MotorOut1==0) M1 = 0;
-			}
-			if (MotorOut2) 
-			{
-				MotorOut2--;
-				if (MotorOut2==0) M2 = 0;
-			}
-			if (MotorOut3) 
-			{
-				MotorOut3--;
-				if (MotorOut3==0) M3 = 0;
-			}
-			if (MotorOut4) 
-			{
-				MotorOut4--;
-				if (MotorOut4==0) M4 = 0;
-			}
-			if (MotorOut5) 
-			{
-				MotorOut5--;
-				if (MotorOut5==0) M5 = 0;
-			}
-		}
-#else
-		for (i=num_of_10uS;i<200;i++)	
-		{
-			while (TCNT0 < 80);			// 10uS @ 8MHz = 80 // 10 @ 1MHz = 10uS
-			TCNT0 -= 80;
-
-			if (MotorOut1) 
-			{
-				MotorOut1--;
-				if (MotorOut1==0) M1 = 0;
-			}
-			if (MotorOut2) 
-			{
-				MotorOut2--;
-				if (MotorOut2==0) M2 = 0;
-			}
-			if (MotorOut3) 
-			{
-				MotorOut3--;
-				if (MotorOut3==0) M3 = 0;
-			}
-			if (MotorOut4) 
-			{
-				MotorOut4--;
-				if (MotorOut4==0) M4 = 0;
-			}
+		do {
+			cli();
+			ElapsedTCNT1 = TCNT1;
+			sei();
+			ElapsedTCNT1-= MotorStartTCNT1;
+			if (ElapsedTCNT1 >= MotorOut1)
+				M1 = 0;
+			if (ElapsedTCNT1 >= MotorOut2)
+				M2 = 0;
+			if (ElapsedTCNT1 >= MotorOut3)
+				M3 = 0;
+			if (ElapsedTCNT1 >= MotorOut4)
+				M4 = 0;
 	#if defined(TWIN_COPTER) || defined(TRI_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
-			if (MotorOut5) 
-			{
-				MotorOut5--;
-				if (MotorOut5==0) M5 = 0;
-			}
+			if (ElapsedTCNT1 >= MotorOut5)
+				M5 = 0;
 	#endif
 	#if defined(TWIN_COPTER) || defined(HEX_COPTER) || defined(Y6_COPTER)
-			if (MotorOut6) 
-			{
-				MotorOut6--;
-				if (MotorOut6==0) M6 = 0;
-			}
+			if (ElapsedTCNT1 >= MotorOut6)
+				M6 = 0;
 	#endif
-		}
-#endif
-
-		//Now wait low signal interval
-		PWM_Low_Count = PWM_Low_Pulse_Interval - 1;
-
-		TIFR0 &= ~(1 << TOV0);		// clr overflow
-		TCNT0 = 0;					// reset counter
-
-		while (PWM_Low_Count--)
-		{
-			while (TCNT0 < 80);		// 20 @ 2MHz = 10uS
-			TCNT0 -= 80;
-		}
+		} while (ElapsedTCNT1 < 2000 + PWM_LOW_PULSE_INTERVAL);
 	}
 
 	// Disable this to always output signal, even when not armed, to avoid Plush beeping
 	// if (! Armed) return;
 
 	// Log PWM signal HIGH	
-	MotorStartTCNT1 = TCNT1;
 	output_motor_high = true;
 
 	// turn on pins
@@ -1498,6 +1565,10 @@ void output_motor_ppm(void)
 	M5 = 1;
 	M6 = 1;
 #endif
+
+	cli();
+	MotorStartTCNT1 = TCNT1;
+	sei();
 }
 
 void eeprom_write_byte_changed( uint8_t * addr, uint8_t value )
