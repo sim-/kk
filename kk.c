@@ -166,7 +166,7 @@
 //#define ESC_RATE 495	// in Hz
 
 // NOTE: Set to 50 for analog servos, 250 for digital servos.
-#define SERVO_RATE 250	// in Hz
+#define SERVO_RATE 50	// in Hz
 
 // Stick arming and throw detection (in % * 10 eg 1000 steps)
 #define STICK_THROW 300
