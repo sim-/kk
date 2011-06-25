@@ -15,7 +15,7 @@
  * Should fit on 48, 88, 168, and 328. I've tested TRICOPTER mode on an
  * ATmega88A. You may wish to use avrdude -t to "dump calibration" and
  * check timings on a digital scope. Temperature and voltage shift the
- * oscillator frequency a little, and each chip responds differently. 
+ * oscillator frequency a little, and each chip responds differently.
  * See doc8271.pdf page 401.
  *
  * I notice a few microseconds of output jitter still with the internal
@@ -33,9 +33,6 @@
  * PPM on M3 and M4 (Rx interrupts can cause some jitter). M3 and M4
  * outputs will be copied to M5 and M6, when not otherwise used, to allow
  * use of full hardware PPM.
- *
- * Mu 
- *
  *
  * General motor output setup:
  *
@@ -1202,7 +1199,7 @@ static void output_motor_ppm()
 	uint16_t t;
 
 	/*
-	 * Bound pulse length and offset by 1ms.
+	 * Bound pulse length to 1ms <= pulse <= 2ms.
 	 */
 
 	t = 1000;
@@ -1270,11 +1267,14 @@ static void output_motor_ppm()
 	 * 8-bit pins to avoid early triggering.
 	 *
 	 * Once entering compare match output mode, we cannot directly
-	 * set the pins; we just fiddle the output high or low as
-	 * necessary and use "force output compare" to turn them on.
-	 * The 8-bit ones will set the pin the same way several times,
-	 * so we just change the mode to clear (set low) after the
-	 * last wrap before the event occurs.
+	 * set the pins. We can use the "force output compare" (which
+	 * doesn't actually force a compare but pretends the comparison
+	 * was true) to fiddle output high or low, but this would still
+	 * have interrupt and instruction-timing-induced jitter. Instead,
+	 * we just set the next desired switch state and set the OCRnx
+	 * registers to a known time in the future. The 8-bit ones will
+	 * set the pin the same way several times, so we have to make
+	 * sure that we don't change the high/low mode too early.
 	 *
 	 * Hardware PPM (timer compare output mode) pin mapping:
 	 *
@@ -1287,8 +1287,7 @@ static void output_motor_ppm()
 	 *
 	 * We must disable interrupts while setting these 16-bit
 	 * registers to avoid Rx interrupts clobbering the internal
-	 * 16-bit temporary register.
-	 *
+	 * 16-bit temporary register for the 16-bit timer.
 	 */
 	cli();
 	OCR1B = MotorStartTCNT1 + MotorOut1;
