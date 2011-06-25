@@ -997,7 +997,7 @@ static inline void loop()
 	if (MotorOut2 > imax)
 		imax = MotorOut2;
 	if (MotorOut3 > imax)
-		imax = MotorOut2;
+		imax = MotorOut3;
 	imax-= 1000;
 	if (imax > 0) {
 		MotorOut1-= imax;
