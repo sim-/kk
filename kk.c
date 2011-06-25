@@ -279,7 +279,7 @@ static int16_t MotorOut4;
 static int16_t MotorOut5;
 static int16_t MotorOut6;
 
-static uint16_t MotorStartTCNT1;
+static int16_t MotorStartTCNT1;
 #if defined(SINGLE_COPTER) || defined(DUAL_COPTER) || defined(TWIN_COPTER) || defined(TRI_COPTER)
 static uint8_t servo_skip;
 #endif
@@ -1196,7 +1196,7 @@ static void RxGetChannels()
 
 static void output_motor_ppm()
 {
-	uint16_t t;
+	int16_t t;
 
 	/*
 	 * Bound pulse length to 1ms <= pulse <= 2ms.
