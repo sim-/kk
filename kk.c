@@ -1285,9 +1285,13 @@ static void output_motor_ppm()
 	 * M5 (PD6): OCR0A (COM0A) 8-bit
 	 * M6 (PD5): OCR0B (COM0B) 8-bit
 	 *
-	 * We must disable interrupts while setting these 16-bit
-	 * registers to avoid Rx interrupts clobbering the internal
-	 * 16-bit temporary register for the 16-bit timer.
+	 * We must disable interrupts while setting the 16-bit registers
+	 * to avoid Rx interrupts clobbering the internal temporary
+	 * register for the associated 16-bit timer. 8 cycles is one
+	 * microsecond at 8 MHz, so we try not to leave interrupts
+	 * disabled for more than 8 cycles.
+	 *
+	 * We turn OFF the pins here, then wait for the ON cycle start.
 	 */
 	cli();
 	OCR1B = MotorStartTCNT1 + MotorOut1;
@@ -1296,9 +1300,9 @@ static void output_motor_ppm()
 	TCCR1A = _BV(COM1A1) | _BV(COM1B1);	/* Next match will clear pins */
 
 	/*
-	 * Only 8 bits will make it, so leave the mode as setting pins
-	 * here and then change to clearing mode after the last wrap
-	 * before the actual time.
+	 * Only 8 bits will make it to the OCR0x registers, so leave the
+	 * mode as setting pins ON here and then change to OFF mode after
+	 * the last wrap before the actual time.
 	 *
 	 * We hope that TCNT0 and TCNT1 are always synchronized.
 	 */
@@ -1321,7 +1325,7 @@ static void output_motor_ppm()
 	} while (t < ((2000 + PWM_LOW_PULSE_US) << 3) - 0xff);
 
 	/*
-	 * We should now be >= 0xff ticks before the next on cycle.
+	 * We should now be <= 0xff ticks before the next on cycle.
 	 *
 	 * Set up the timer compare values, wait for the on time, then
 	 * turn on software pins. We hope that we will be called again
@@ -1414,6 +1418,9 @@ static void output_motor_ppm()
 	M3 = 1;
 	M4 = 1;
 #endif
+	/*
+	 * We leave with the output pins ON.
+	 */
 }
 
 static void eeprom_write_byte_changed(uint8_t *addr, uint8_t value)
