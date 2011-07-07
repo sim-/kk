@@ -1328,7 +1328,8 @@ static void output_motor_ppm()
 			TCCR0A&= ~_BV(COM0A0);	/* Clear pin on match */
 		if (t + 0xff >= MotorOut6)
 			TCCR0A&= ~_BV(COM0B0);	/* Clear pin on match */
-	} while (t < ((2000 + PWM_LOW_PULSE_US) << 3) - 0xff);
+		t-= ((2000 + PWM_LOW_PULSE_US) << 3) - 0xff;
+	} while (t < 0);
 
 	/*
 	 * We should now be <= 0xff ticks before the next on cycle.
@@ -1344,11 +1345,23 @@ static void output_motor_ppm()
 	 */
 
 	MotorStartTCNT1+= (2000 + PWM_LOW_PULSE_US) << 3;
+#if 0
 	cli();
 	t = TCNT1;
 	sei();
-	if (t >= MotorStartTCNT1)
+	t+= 0x3f;
+	t-= MotorStartTCNT1;
+	if (t >= 0) {
+		/*
+		 * We've already passed the on cycle, hmm.
+		 * Push it into the future.
+		 */
+		cli();
+		t = TCNT1;
+		sei();
 		MotorStartTCNT1 = t + 0xff;
+	}
+#endif
 	t = MotorStartTCNT1;
 	cli();
 	OCR1B = t;
@@ -1400,7 +1413,8 @@ static void output_motor_ppm()
 		cli();
 		t = TCNT1;
 		sei();
-	} while (t < MotorStartTCNT1);
+		t-= MotorStartTCNT1;
+	} while (t < 0);
 
 #ifdef SINGLE_COPTER
 	if (servo_skip == 0) {
