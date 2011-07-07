@@ -1293,9 +1293,15 @@ static void output_motor_ppm()
 	 *
 	 * We turn OFF the pins here, then wait for the ON cycle start.
 	 */
+	t = MotorStartTCNT1 + MotorOut1;
+	asm(""::"r" (t)); /* Avoid reordering of add after cli */
 	cli();
-	OCR1B = MotorStartTCNT1 + MotorOut1;
-	OCR1A = MotorStartTCNT1 + MotorOut2;
+	OCR1B = t;
+	sei();
+	t = MotorStartTCNT1 + MotorOut2;
+	asm(""::"r" (t)); /* Avoid reordering of add after cli */
+	cli();
+	OCR1A = t;
 	sei();
 	TCCR1A = _BV(COM1A1) | _BV(COM1B1);	/* Next match will clear pins */
 
@@ -1343,12 +1349,15 @@ static void output_motor_ppm()
 	sei();
 	if (t >= MotorStartTCNT1)
 		MotorStartTCNT1 = t + 0xff;
+	t = MotorStartTCNT1;
 	cli();
-	OCR1B = MotorStartTCNT1;
-	OCR1A = MotorStartTCNT1;
+	OCR1B = t;
 	sei();
-	OCR0A = MotorStartTCNT1;
-	OCR0B = MotorStartTCNT1;
+	OCR0A = t;
+	OCR0B = t;
+	cli();
+	OCR1A = t;
+	sei();
 
 #ifdef SINGLE_COPTER
 	if (servo_skip == 0) {
