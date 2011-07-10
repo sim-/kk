@@ -1486,9 +1486,7 @@ static void Set_EEPROM_Default_Config()
 
 static void Save_Config_to_EEPROM()
 {
-	cli();
 	eeprom_write_block_changes(
 		(const void *)&Config, (void *)EEPROM_DATA_START_POS,
 		sizeof(struct config));
-	sei();
 }
